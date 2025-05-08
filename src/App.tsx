@@ -33,6 +33,8 @@ function App() {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [activeCall, setActiveCall] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isTestingCamera, setIsTestingCamera] = useState(false);
+  const [isRequestingPermissions, setIsRequestingPermissions] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -46,17 +48,27 @@ function App() {
       if (localVideoRef.current) {
         localVideoRef.current.onloadedmetadata = () => {
           console.log('Local video metadata loaded in effect');
-          localVideoRef.current?.play()
-            .then(() => console.log('Local video playing'))
-            .catch(e => console.error('Error playing local video in effect:', e));
+          if (localVideoRef.current?.srcObject) {
+            console.log('Local video has srcObject:', localVideoRef.current.srcObject);
+            localVideoRef.current.play()
+              .then(() => console.log('Local video playing'))
+              .catch(e => console.error('Error playing local video in effect:', e));
+          } else {
+            console.error('Local video has no srcObject');
+          }
         };
       }
       if (remoteVideoRef.current) {
         remoteVideoRef.current.onloadedmetadata = () => {
           console.log('Remote video metadata loaded in effect');
-          remoteVideoRef.current?.play()
-            .then(() => console.log('Remote video playing'))
-            .catch(e => console.error('Error playing remote video in effect:', e));
+          if (remoteVideoRef.current?.srcObject) {
+            console.log('Remote video has srcObject:', remoteVideoRef.current.srcObject);
+            remoteVideoRef.current.play()
+              .then(() => console.log('Remote video playing'))
+              .catch(e => console.error('Error playing remote video in effect:', e));
+          } else {
+            console.error('Remote video has no srcObject');
+          }
         };
       }
     };
@@ -80,6 +92,13 @@ function App() {
     newSocket.on('video_offer', async (data) => {
       console.log('Received video offer from:', data.from);
       try {
+        // First set video enabled to ensure elements are mounted
+        setIsVideoEnabled(true);
+        setActiveCall(data.from);
+        
+        // Wait for next render cycle
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         const stream = await navigator.mediaDevices.getUserMedia({ 
           video: { 
             width: { ideal: 1280 },
@@ -88,9 +107,12 @@ function App() {
           audio: true 
         });
         
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
+        if (!localVideoRef.current) {
+          throw new Error('Local video element not found');
         }
+
+        localVideoRef.current.srcObject = stream;
+        await localVideoRef.current.play();
 
         const pc = createPeerConnection(data.from);
         stream.getTracks().forEach(track => {
@@ -111,11 +133,12 @@ function App() {
         });
 
         peerConnections.current.set(data.from, { pc, stream });
-        setActiveCall(data.from);
-        setIsVideoEnabled(true);
       } catch (error) {
         console.error('Error handling video offer:', error);
         setError('Failed to start video call: ' + (error as Error).message);
+        setIsVideoEnabled(false);
+        setActiveCall(null);
+        endVideoCall();
       }
     });
 
@@ -168,6 +191,7 @@ function App() {
     };
 
     const pc = new RTCPeerConnection(configuration);
+    let remoteStream: MediaStream | null = null;
     
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -195,31 +219,50 @@ function App() {
       console.log('Signaling state:', pc.signalingState);
     };
 
-    pc.ontrack = (event) => {
-      console.log('Received track:', event.track.kind);
-      console.log('Track settings:', event.track.getSettings());
-      console.log('Track constraints:', event.track.getConstraints());
-      console.log('Track ready state:', event.track.readyState);
-      console.log('Streams:', event.streams);
+    pc.ontrack = async (event) => {
+      console.log('Received track:', {
+        kind: event.track.kind,
+        enabled: event.track.enabled,
+        muted: event.track.muted,
+        readyState: event.track.readyState,
+        settings: event.track.getSettings()
+      });
       
-      if (remoteVideoRef.current) {
+      if (!remoteVideoRef.current) {
+        console.error('Remote video element not found, waiting for mount...');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (!remoteVideoRef.current) {
+          console.error('Remote video element still not found after wait');
+          return;
+        }
+      }
+
+      // Only set the stream once when we receive the first track
+      if (!remoteStream) {
+        remoteStream = event.streams[0];
         console.log('Setting remote video stream');
-        const stream = event.streams[0];
-        console.log('Remote stream tracks:', stream.getTracks().map(t => ({
+        console.log('Remote stream tracks:', remoteStream.getTracks().map(t => ({
           kind: t.kind,
-          settings: t.getSettings(),
+          enabled: t.enabled,
+          muted: t.muted,
           readyState: t.readyState
         })));
         
-        remoteVideoRef.current.srcObject = stream;
+        remoteVideoRef.current.srcObject = remoteStream;
         
-        setTimeout(() => {
-          if (remoteVideoRef.current) {
-            remoteVideoRef.current.play()
-              .then(() => console.log('Remote video playing after delay'))
-              .catch(e => console.error('Error playing remote video after delay:', e));
-          }
-        }, 1000);
+        try {
+          // Wait for metadata to load before playing
+          await new Promise((resolve) => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.onloadedmetadata = resolve;
+            }
+          });
+          
+          await remoteVideoRef.current.play();
+          console.log('Remote video playing successfully');
+        } catch (e) {
+          console.error('Error playing remote video:', e);
+        }
       }
     };
 
@@ -229,39 +272,58 @@ function App() {
   const startVideoCall = async (targetId: string) => {
     console.log('Starting video call with:', targetId);
     try {
+      // First set video enabled to ensure elements are mounted
+      setIsVideoEnabled(true);
+      
+      // Wait for next render cycle
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      console.log('Requesting media devices...');
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user',
-          frameRate: { ideal: 30 }
-        }, 
+        video: true,
         audio: true 
       });
       
-      console.log('Got local media stream:', stream.getTracks().map(t => ({
-        kind: t.kind,
-        settings: t.getSettings(),
-        constraints: t.getConstraints(),
-        readyState: t.readyState
-      })));
+      console.log('Media devices granted:', {
+        videoTracks: stream.getVideoTracks().map(t => ({
+          label: t.label,
+          enabled: t.enabled,
+          muted: t.muted,
+          readyState: t.readyState,
+          settings: t.getSettings()
+        })),
+        audioTracks: stream.getAudioTracks().map(t => ({
+          label: t.label,
+          enabled: t.enabled,
+          muted: t.muted,
+          readyState: t.readyState
+        }))
+      });
       
-      if (localVideoRef.current) {
-        console.log('Setting local video stream');
-        localVideoRef.current.srcObject = stream;
-        
-        setTimeout(() => {
-          if (localVideoRef.current) {
-            localVideoRef.current.play()
-              .then(() => console.log('Local video playing after delay'))
-              .catch(e => console.error('Error playing local video after delay:', e));
-          }
-        }, 1000);
+      if (!localVideoRef.current) {
+        throw new Error('Local video element not found');
+      }
+
+      console.log('Setting local video stream');
+      localVideoRef.current.srcObject = stream;
+      
+      // Force play the video
+      try {
+        await localVideoRef.current.play();
+        console.log('Local video playing successfully');
+      } catch (e) {
+        console.error('Error playing local video:', e);
+        throw e;
       }
 
       const pc = createPeerConnection(targetId);
       stream.getTracks().forEach(track => {
-        console.log('Adding track to peer connection:', track.kind);
+        console.log('Adding track to peer connection:', {
+          kind: track.kind,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState
+        });
         pc.addTrack(track, stream);
       });
 
@@ -279,10 +341,11 @@ function App() {
 
       peerConnections.current.set(targetId, { pc, stream });
       setActiveCall(targetId);
-      setIsVideoEnabled(true);
     } catch (error) {
       console.error('Error starting video call:', error);
       setError('Failed to start video call: ' + (error as Error).message);
+      setIsVideoEnabled(false);
+      endVideoCall();
     }
   };
 
@@ -309,10 +372,43 @@ function App() {
     }
   };
 
-  const handleJoin = () => {
+  const requestPermissions = async () => {
+    try {
+      setIsRequestingPermissions(true);
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: true,
+        audio: true 
+      });
+      // Stop the stream immediately after getting permissions
+      stream.getTracks().forEach(track => track.stop());
+      return true;
+    } catch (error) {
+      console.error('Error requesting permissions:', error);
+      setError('Camera and microphone permissions are required for video calls. Please grant permissions and try again.');
+      return false;
+    } finally {
+      setIsRequestingPermissions(false);
+    }
+  };
+
+  const handleJoin = async () => {
     if (username.trim() && socket) {
-      socket.emit('user_join', username);
-      setHasJoined(true);
+      try {
+        setIsRequestingPermissions(true);
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true,
+          audio: true 
+        });
+        // Stop the stream immediately after getting permissions
+        stream.getTracks().forEach(track => track.stop());
+        socket.emit('user_join', username);
+        setHasJoined(true);
+      } catch (error) {
+        console.error('Error requesting permissions:', error);
+        setError('Camera and microphone permissions are required for video calls. Please grant permissions and try again.');
+      } finally {
+        setIsRequestingPermissions(false);
+      }
     }
   };
 
@@ -321,6 +417,54 @@ function App() {
     if (message.trim() && socket) {
       socket.emit('message', message);
       setMessage('');
+    }
+  };
+
+  // Add this new useEffect for video element initialization
+  useEffect(() => {
+    if (isVideoEnabled) {
+      const initializeVideos = async () => {
+        if (localVideoRef.current && localVideoRef.current.srcObject) {
+          try {
+            await localVideoRef.current.play();
+            console.log('Local video initialized and playing');
+          } catch (e) {
+            console.error('Error initializing local video:', e);
+          }
+        }
+        
+        if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
+          try {
+            await remoteVideoRef.current.play();
+            console.log('Remote video initialized and playing');
+          } catch (e) {
+            console.error('Error initializing remote video:', e);
+          }
+        }
+      };
+
+      initializeVideos();
+    }
+  }, [isVideoEnabled]);
+
+  const testCamera = async () => {
+    try {
+      setIsTestingCamera(true);
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: true,
+        audio: true 
+      });
+      
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        await localVideoRef.current.play();
+        console.log('Camera test successful');
+      }
+    } catch (error) {
+      console.error('Camera test failed:', error);
+      setError('Camera test failed: ' + (error as Error).message);
+    } finally {
+      setIsTestingCamera(false);
     }
   };
 
@@ -356,10 +500,13 @@ function App() {
               variant="contained" 
               onClick={handleJoin} 
               fullWidth
-              disabled={!username.trim()}
+              disabled={!username.trim() || isRequestingPermissions}
             >
-              Join Chat
+              {isRequestingPermissions ? 'Requesting Permissions...' : 'Join Chat'}
             </Button>
+            <Typography variant="caption" color="text.secondary" align="center">
+              Camera and microphone permissions will be requested when joining
+            </Typography>
           </Box>
         </Paper>
       </Container>
@@ -373,15 +520,28 @@ function App() {
           <Box sx={{ width: '70%', display: 'flex', flexDirection: 'column' }}>
             <Box sx={{ p: 2, bgcolor: 'primary.main', color: 'white', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <Typography variant="h6">Offline Messenger</Typography>
-              {isVideoEnabled && (
-                <IconButton color="inherit" onClick={endVideoCall}>
-                  <CallEndIcon />
-                </IconButton>
-              )}
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                {!isVideoEnabled && (
+                  <Button
+                    variant="contained"
+                    color="secondary"
+                    onClick={testCamera}
+                    disabled={isTestingCamera}
+                    size="small"
+                  >
+                    Test Camera
+                  </Button>
+                )}
+                {isVideoEnabled && (
+                  <IconButton color="inherit" onClick={endVideoCall}>
+                    <CallEndIcon />
+                  </IconButton>
+                )}
+              </Box>
             </Box>
             {isVideoEnabled && (
-              <Box sx={{ display: 'flex', gap: 2, p: 2, bgcolor: 'grey.100' }}>
-                <Box sx={{ width: '50%' }}>
+              <Box sx={{ display: 'flex', gap: 2, p: 2, bgcolor: 'grey.100', minHeight: '240px' }}>
+                <Box sx={{ width: '50%', position: 'relative', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden' }}>
                   <video
                     ref={localVideoRef}
                     autoPlay
@@ -389,23 +549,55 @@ function App() {
                     playsInline
                     style={{ 
                       width: '100%', 
+                      height: '240px',
                       borderRadius: '8px', 
                       backgroundColor: '#000',
-                      transform: 'scaleX(-1)'
+                      transform: 'scaleX(-1)',
+                      objectFit: 'cover'
                     }}
                   />
+                  <Typography 
+                    variant="caption" 
+                    sx={{ 
+                      position: 'absolute', 
+                      bottom: 8, 
+                      left: 8, 
+                      color: 'white',
+                      backgroundColor: 'rgba(0,0,0,0.5)',
+                      padding: '2px 8px',
+                      borderRadius: '4px'
+                    }}
+                  >
+                    You
+                  </Typography>
                 </Box>
-                <Box sx={{ width: '50%' }}>
+                <Box sx={{ width: '50%', position: 'relative', backgroundColor: '#000', borderRadius: '8px', overflow: 'hidden' }}>
                   <video
                     ref={remoteVideoRef}
                     autoPlay
                     playsInline
                     style={{ 
                       width: '100%', 
+                      height: '240px',
                       borderRadius: '8px', 
-                      backgroundColor: '#000'
+                      backgroundColor: '#000',
+                      objectFit: 'cover'
                     }}
                   />
+                  <Typography 
+                    variant="caption" 
+                    sx={{ 
+                      position: 'absolute', 
+                      bottom: 8, 
+                      left: 8, 
+                      color: 'white',
+                      backgroundColor: 'rgba(0,0,0,0.5)',
+                      padding: '2px 8px',
+                      borderRadius: '4px'
+                    }}
+                  >
+                    Remote
+                  </Typography>
                 </Box>
               </Box>
             )}
@@ -444,14 +636,23 @@ function App() {
                 <ListItem 
                   key={user.id}
                   secondaryAction={
-                    !isVideoEnabled && user.id !== socket?.id && (
-                      <IconButton edge="end" onClick={() => startVideoCall(user.id)}>
+                    user.id !== socket?.id && (
+                      <IconButton 
+                        edge="end" 
+                        onClick={() => startVideoCall(user.id)}
+                        color={isVideoEnabled ? "default" : "primary"}
+                        title="Start video call"
+                        disabled={isVideoEnabled}
+                      >
                         <VideocamIcon />
                       </IconButton>
                     )
                   }
                 >
-                  <ListItemText primary={user.username} />
+                  <ListItemText 
+                    primary={user.username} 
+                    secondary={user.id === socket?.id ? "(You)" : ""}
+                  />
                 </ListItem>
               ))}
             </List>
