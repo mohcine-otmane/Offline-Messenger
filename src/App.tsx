@@ -39,6 +39,7 @@ function App() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnections = useRef<Map<string, PeerConnection>>(new Map());
+  const pendingCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
   useEffect(() => {
     const newSocket = io('http://localhost:3001');
@@ -123,6 +124,20 @@ function App() {
         await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
         console.log('Set remote description');
         
+        // Flush queued ICE candidates
+        const queued = pendingCandidates.current.get(data.from);
+        if (queued) {
+          for (const candidate of queued) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              console.log('Added queued ICE candidate');
+            } catch (error) {
+              console.error('Error adding queued ICE candidate:', error);
+            }
+          }
+          pendingCandidates.current.delete(data.from);
+        }
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         console.log('Created and set local answer');
@@ -160,11 +175,20 @@ function App() {
       console.log('Received ICE candidate from:', data.from);
       const pc = peerConnections.current.get(data.from)?.pc;
       if (pc) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-          console.log('Added ICE candidate');
-        } catch (error) {
-          console.error('Error handling ICE candidate:', error);
+        if (!pc.remoteDescription || !pc.remoteDescription.type) {
+          // Queue the candidate if remote description is not set
+          if (!pendingCandidates.current.has(data.from)) {
+            pendingCandidates.current.set(data.from, []);
+          }
+          pendingCandidates.current.get(data.from)!.push(data.candidate);
+          console.log('Queued ICE candidate');
+        } else {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            console.log('Added ICE candidate');
+          } catch (error) {
+            console.error('Error handling ICE candidate:', error);
+          }
         }
       }
     });
@@ -394,13 +418,36 @@ function App() {
   const handleJoin = async () => {
     if (username.trim() && socket) {
       try {
+        console.log('Requesting camera and microphone permissions...');
         setIsRequestingPermissions(true);
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: true,
-          audio: true 
-        });
-        // Stop the stream immediately after getting permissions
-        stream.getTracks().forEach(track => track.stop());
+        
+        // First check if we already have permissions
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const hasVideoPermission = devices.some(device => device.kind === 'videoinput' && device.label);
+        const hasAudioPermission = devices.some(device => device.kind === 'audioinput' && device.label);
+        
+        console.log('Current permissions:', { hasVideoPermission, hasAudioPermission });
+        
+        if (!hasVideoPermission || !hasAudioPermission) {
+          console.log('Requesting new permissions...');
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            },
+            audio: true 
+          });
+          console.log('Permissions granted, stopping test stream');
+          // Stop the stream immediately after getting permissions
+          stream.getTracks().forEach(track => {
+            console.log('Stopping track:', track.kind);
+            track.stop();
+          });
+        } else {
+          console.log('Already have permissions');
+        }
+
+        console.log('Joining chat...');
         socket.emit('user_join', username);
         setHasJoined(true);
       } catch (error) {
@@ -505,7 +552,7 @@ function App() {
               {isRequestingPermissions ? 'Requesting Permissions...' : 'Join Chat'}
             </Button>
             <Typography variant="caption" color="text.secondary" align="center">
-              Camera and microphone permissions will be requested when joining
+              Camera and microphone permissions are required for video calls
             </Typography>
           </Box>
         </Paper>
