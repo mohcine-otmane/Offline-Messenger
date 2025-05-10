@@ -42,7 +42,7 @@ function App() {
   const pendingCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
   useEffect(() => {
-    const newSocket = io('http://localhost:3001');
+    const newSocket = io(`http://${window.location.hostname}:3001`);
     setSocket(newSocket);
 
     const initializeVideoElements = () => {
