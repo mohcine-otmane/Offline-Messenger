@@ -43,6 +43,7 @@ function App() {
 
   useEffect(() => {
     const newSocket = io(`http://${window.location.hostname}:3001`);
+    console.log('Socket connection attempt:', newSocket);
     setSocket(newSocket);
 
     const initializeVideoElements = () => {
@@ -416,46 +417,52 @@ function App() {
   };
 
   const handleJoin = async () => {
-    if (username.trim() && socket) {
-      try {
-        console.log('Requesting camera and microphone permissions...');
-        setIsRequestingPermissions(true);
-        
-        // First check if we already have permissions
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const hasVideoPermission = devices.some(device => device.kind === 'videoinput' && device.label);
-        const hasAudioPermission = devices.some(device => device.kind === 'audioinput' && device.label);
-        
-        console.log('Current permissions:', { hasVideoPermission, hasAudioPermission });
-        
-        if (!hasVideoPermission || !hasAudioPermission) {
-          console.log('Requesting new permissions...');
-          const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: {
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            },
-            audio: true 
-          });
-          console.log('Permissions granted, stopping test stream');
-          // Stop the stream immediately after getting permissions
-          stream.getTracks().forEach(track => {
-            console.log('Stopping track:', track.kind);
-            track.stop();
-          });
-        } else {
-          console.log('Already have permissions');
-        }
-
-        console.log('Joining chat...');
-        socket.emit('user_join', username);
-        setHasJoined(true);
-      } catch (error) {
-        console.error('Error requesting permissions:', error);
-        setError('Camera and microphone permissions are required for video calls. Please grant permissions and try again.');
-      } finally {
-        setIsRequestingPermissions(false);
+    if (!username.trim() || !socket) {
+      console.log('Username or socket is missing:', { username, socket });
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      setError('Camera and microphone are not supported in this browser or environment.');
+      return;
+    }
+    try {
+      console.log('Requesting camera and microphone permissions...');
+      setIsRequestingPermissions(true);
+      
+      // First check if we already have permissions
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const hasVideoPermission = devices.some(device => device.kind === 'videoinput' && device.label);
+      const hasAudioPermission = devices.some(device => device.kind === 'audioinput' && device.label);
+      
+      console.log('Current permissions:', { hasVideoPermission, hasAudioPermission });
+      
+      if (!hasVideoPermission || !hasAudioPermission) {
+        console.log('Requesting new permissions...');
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: true 
+        });
+        console.log('Permissions granted, stopping test stream');
+        // Stop the stream immediately after getting permissions
+        stream.getTracks().forEach(track => {
+          console.log('Stopping track:', track.kind);
+          track.stop();
+        });
+      } else {
+        console.log('Already have permissions');
       }
+
+      console.log('Joining chat...');
+      socket.emit('user_join', username);
+      setHasJoined(true);
+    } catch (error) {
+      console.error('Error requesting permissions:', error);
+      setError('Camera and microphone permissions are required for video calls. Please grant permissions and try again.');
+    } finally {
+      setIsRequestingPermissions(false);
     }
   };
 
